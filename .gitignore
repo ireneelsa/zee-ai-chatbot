@@ -1,0 +1,8 @@
+node_modules/
+backend/.venv/
+backend/zee.db
+backend/.env
+backend/__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
