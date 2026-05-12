@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from auth import get_current_user
 
 load_dotenv()
 
@@ -17,3 +18,7 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+@app.get("/whoami")
+async def whoami(user=Depends(get_current_user)):
+    return {"user": user}
