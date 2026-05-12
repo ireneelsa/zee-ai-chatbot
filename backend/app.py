@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -10,6 +11,15 @@ load_dotenv()
 import llm
 from auth import get_current_user
 from personas import ANALYST_SYSTEM, COACH_SYSTEM
+from tools import (
+    ANALYST_SCHEMAS,
+    ANALYST_TOOLS,
+    COACH_SCHEMAS,
+    COACH_TOOLS,
+    ToolError,
+)
+from tools.coach import *  # noqa: F401,F403 — triggers tool registration
+from tools.analyst import *  # noqa: F401,F403 — triggers tool registration
 
 load_dotenv()
 
@@ -73,28 +83,65 @@ async def send_message(
     conversations.append_message(conv_id, "user", user_content)
 
     history = conversations.list_messages(conv_id)
-    api_messages = [{"role": m["role"], "content": m["content"]} for m in history]
+    api_messages = [
+        {
+            "role": "user" if m["role"] == "tool" else m["role"],
+            "content": m["content"],
+        }
+        for m in history
+    ]
 
-    system = COACH_SYSTEM if conv["persona"] == "coach" else ANALYST_SYSTEM
+    persona = conv["persona"]
+    system = COACH_SYSTEM if persona == "coach" else ANALYST_SYSTEM
     model = llm.pick_model(body.message)
+    tools_registry = COACH_TOOLS if persona == "coach" else ANALYST_TOOLS
+    tools_schema = COACH_SCHEMAS if persona == "coach" else ANALYST_SCHEMAS
 
-    result = await llm.chat(
-        messages=api_messages,
-        system=system,
-        model=model,
-        tools=[],
-        max_tokens=1024,
-    )
+    MAX_HOPS = 4
+    resp = None
+    for hop in range(MAX_HOPS):
+        resp = await llm.chat(
+            messages=api_messages,
+            system=system,
+            model=model,
+            tools=tools_schema,
+            max_tokens=1024,
+        )
+        conversations.append_message(
+            conv_id,
+            "assistant",
+            resp["content"],
+            model=resp["usage"]["model"],
+            tokens_in=resp["usage"]["tokens_in"],
+            tokens_out=resp["usage"]["tokens_out"],
+            latency_ms=resp["usage"]["latency_ms"],
+        )
+        api_messages.append({"role": "assistant", "content": resp["content"]})
 
-    usage = result["usage"]
-    conversations.append_message(
-        conv_id,
-        "assistant",
-        result["content"],
-        model=usage["model"],
-        tokens_in=usage["tokens_in"],
-        tokens_out=usage["tokens_out"],
-        latency_ms=usage["latency_ms"],
-    )
+        if resp["stop_reason"] != "tool_use":
+            break
 
-    return {"content": result["content"], "usage": usage}
+        tool_results = []
+        for block in resp["content"]:
+            if block.get("type") != "tool_use":
+                continue
+            try:
+                fn = tools_registry[block["name"]]
+                result = await fn(block["input"], user)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": json.dumps(result),
+                })
+            except (KeyError, ToolError) as e:
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": f"Error: {e}",
+                    "is_error": True,
+                })
+
+        conversations.append_message(conv_id, "tool", tool_results)
+        api_messages.append({"role": "user", "content": tool_results})
+
+    return {"content": resp["content"], "usage": resp["usage"]}
