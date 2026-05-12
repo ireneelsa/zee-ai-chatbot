@@ -19,6 +19,3 @@ app.add_middleware(
 async def health():
     return {"status": "ok"}
 
-@app.get("/whoami")
-async def whoami(user=Depends(get_current_user)):
-    return {"user": user}
