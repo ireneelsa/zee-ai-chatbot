@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import conversations
 load_dotenv()
 import llm
+import quota
 from auth import get_current_user
 from personas import ANALYST_SYSTEM, COACH_SYSTEM
 from tools import (
@@ -20,6 +21,7 @@ from tools import (
 )
 from tools.coach import *  # noqa: F401,F403 — triggers tool registration
 from tools.analyst import *  # noqa: F401,F403 — triggers tool registration
+from tools.drafts import *  # noqa: F401,F403 — draft tools registration
 
 load_dotenv()
 
@@ -75,6 +77,8 @@ async def send_message(
     body: SendMessageBody,
     user=Depends(get_current_user),
 ):
+    quota.check_and_increment(user["account_id"], user["account_type"])
+
     conv = conversations.get_conversation(conv_id, user["account_id"])
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -99,6 +103,8 @@ async def send_message(
 
     MAX_HOPS = 4
     resp = None
+    total_in = 0
+    total_out = 0
     for hop in range(MAX_HOPS):
         resp = await llm.chat(
             messages=api_messages,
@@ -107,6 +113,8 @@ async def send_message(
             tools=tools_schema,
             max_tokens=1024,
         )
+        total_in += resp["usage"]["tokens_in"]
+        total_out += resp["usage"]["tokens_out"]
         conversations.append_message(
             conv_id,
             "assistant",
@@ -143,5 +151,7 @@ async def send_message(
 
         conversations.append_message(conv_id, "tool", tool_results)
         api_messages.append({"role": "user", "content": tool_results})
+
+    quota.finalize_usage(user["account_id"], total_in, total_out)
 
     return {"content": resp["content"], "usage": resp["usage"]}
